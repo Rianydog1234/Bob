@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    #dropdown {
+      border: 1px solid #ccc;
+      max-height: 150px;
+      overflow-y: auto;
+      display: none;
+      position: absolute;
+      background: white;
+      width: 300px;
+      z-index: 999;
+    }
+    .item {
+      padding: 6px;
+      cursor: pointer;
+    }
+    .item:hover {
+      background: #eee;
+    }
+    .project-btn {
+      display: block;
+      margin: 5px 0;
+    }
+    #adminIcon {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      cursor: pointer;
+      font-size: 22px;
+      z-index: 1000;
+    }
+    .admin-panel {
+      font-family: Arial, sans-serif;
+      padding: 10px;
+    }
+    .msg {
+      padding: 10px;
+      margin-top: 10px;
+    }
+    .msg.ok {
+      background: #ccffcc;
+      border: 1px solid #00aa00;
+    }
+    .msg.err {
+      background: #ffcccc;
+      border: 1px solid #aa0000;
+    }
+    .log {
+      margin-top: 10px;
+      max-height: 150px;
+      overflow: auto;
+      background: #fafafa;
+      border: 1px solid #ddd;
+      padding: 6px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<h3>Enter your name</h3>
+<input id="nameInput" autocomplete="off" placeholder="name" style="width:300px">
+<div id="dropdown"></div>
+
+<h3>Select project</h3>
+<div id="projects"></div>
+
+<button id="submitBtn">Submit</button>
+<div id="result"></div>
+
+<script>
+function normalizeText(text) {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+let students = [];
+let projects = [];
+let selectedStudent = null;
+let selectedProject = null;
+
+google.script.run.withSuccessHandler(data => {
+  students = data.students;
+  projects = data.projects;
+  renderProjects();
+}).getStudentData();
+
+const input = document.getElementById("nameInput");
+const dropdown = document.getElementById("dropdown");
+
+input.addEventListener("input", () => {
+  const value = normalizeText(input.value);
+  dropdown.innerHTML = "";
+
+  if (!value) {
+    dropdown.style.display = "none";
+    return;
+  }
+
+  students
+    .filter(s => normalizeText(s.fullName).includes(value))
+    .forEach(s => {
+      const div = document.createElement("div");
+      div.className = "item";
+      div.textContent = s.fullName;
+      div.onclick = () => {
+        input.value = s.fullName;
+        selectedStudent = s;
+        dropdown.style.display = "none";
+        document.getElementById("result").innerHTML = "";
+      };
+      dropdown.appendChild(div);
+    });
+
+  dropdown.style.display = dropdown.children.length ? "block" : "none";
+});
+
+function renderProjects() {
+  const c = document.getElementById("projects");
+  c.innerHTML = "";
+
+  projects.forEach(p => {
+    const btn = document.createElement("button");
+    btn.textContent = p;
+    btn.className = "project-btn";
+    btn.onclick = () => {
+      selectedProject = p;
+      document.getElementById("result").innerHTML =
+        `<div style="background:#eef;padding:10px">Selected: <b>${p}</b></div>`;
+    };
+    c.appendChild(btn);
+  });
+}
+
+document.getElementById("submitBtn").onclick = submitSelection;
+
+function submitSelection() {
+  const result = document.getElementById("result");
+
+  if (!selectedStudent) {
+    result.innerHTML = "<div style='color:red'>Select your name</div>";
+    return;
+  }
+
+  if (!selectedProject) {
+    result.innerHTML = "<div style='color:red'>Select a project</div>";
+    return;
+  }
+
+  if (selectedStudent.projects[selectedProject]) {
+    result.innerHTML =
+      `<div style="background:#ffcccc;padding:10px">
+        ❌ You have already been on "${selectedProject}"
+      </div>`;
+    return;
+  }
+
+  if (!confirm(`Sign in to "${selectedProject}"?`)) return;
+
+  google.script.run
+    .withSuccessHandler(() => {
+      result.innerHTML =
+        `<div style="background:#ccffcc;padding:10px">
+          ✅ Successfully signed in
+        </div>`;
+    })
+    .withFailureHandler(err => {
+      result.innerHTML =
+        `<div style="background:#ffcccc;padding:10px">
+          ❌ ${err.message}
+        </div>`;
+    })
+    .submitStudentToProject(selectedStudent.fullName, selectedProject);
+}
+</script>
+
+<!-- Admin Icon -->
+<button id="adminIcon">⚙️</button>
+<!-- Admin Panel (hidden by default) -->
+<div id="adminPanel" style="display:none; position:fixed; top:50px; left:50px; width:520px; height:420px; background:white; border:1px solid #ccc; padding:12px; z-index:9999;">
+  <h2>Admin Panel</h2>
+  <div>
+    <button id="closeBtn">Close Sheet (Shuffle & Archive)</button>
+    <button id="newBtn">Create New Sheet & Set Active</button>
+    <button id="hideBtn">Hide Panel</button>
+  </div>
+  <div id="messageArea"></div>
+  <div class="log" id="adminLog" style="display:none"></div>
+</div>
+
+<script>
+  // Show admin panel
+  document.getElementById("adminIcon").onclick = () => {
+    const name = prompt("Admin name:");
+    if (name !== "r") {
+      alert("Access denied");
+      return;
+    }
+    document.getElementById("adminPanel").style.display = "block";
+  };
+
+  // Hide panel button
+  document.getElementById("hideBtn").onclick = () => {
+    document.getElementById("adminPanel").style.display = "none";
+  };
+
+  // Utility functions
+  function showMessage(html, ok) {
+    const area = document.getElementById("messageArea");
+    area.innerHTML = '<div class="msg ' + (ok ? 'ok' : 'err') + '">' + html + '</div>';
+  }
+
+  function appendLog(text) {
+    const log = document.getElementById("adminLog");
+    log.style.display = "block";
+    log.innerHTML = (log.innerHTML ? log.innerHTML + "<br/>" : "") + text;
+  }
+
+  // Close Sheet (shuffle & archive)
+  document.getElementById("closeBtn").onclick = () => {
+    showMessage("Working...", true);
+    appendLog("Starting closeSheet at " + new Date().toISOString());
+
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res && res.ok) {
+          showMessage(res.message || "Closed successfully.", true);
+          appendLog("Close success: " + (res.message || ""));
+        } else {
+          showMessage(res ? res.message : "Unknown error", false);
+          appendLog("Close failed: " + (res ? res.message : "no response"));
+        }
+      })
+      .withFailureHandler(err => {
+        showMessage("Error: " + (err.message || err.toString()), false);
+        appendLog("RPC failure: " + (err.message || err.toString()));
+      })
+      .adminCloseSheet(); // Calls your server-side function
+  };
+
+  // Create new sheet
+  document.getElementById("newBtn").onclick = () => {
+    showMessage("Creating new sheet...", true);
+    appendLog("createNewTargetSheet started at " + new Date().toISOString());
+
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res && res.ok) {
+          showMessage("Created: " + (res.sheetName || "") + " (id: " + (res.sheetId || "") + ")", true);
+          appendLog("Created sheet: " + (res.sheetName || "") + " id=" + (res.sheetId || ""));
+        } else {
+          showMessage(res ? res.message : "Unknown error", false);
+          appendLog("Create failed: " + (res ? res.message : "no response"));
+        }
+      })
+      .withFailureHandler(err => {
+        showMessage("Error: " + (err.message || err.toString()), false);
+        appendLog("RPC failure: " + (err.message || err.toString()));
+      })
+      .createNewTargetSheet(); // Calls your server-side function
+  };
+</script>
+
+</body>
+</html>
