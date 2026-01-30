@@ -352,8 +352,8 @@ function applyGenderColors(sheet, col, startRow, maxRows) {
     }
 
     const color =
-      gender === "female" ? "#ff000033" :
-      gender === "male"   ? "#0000ff33" :
+      gender === "F" ? "#ff000033" :
+      gender === "M"   ? "#0000ff33" :
       null;
 
     if (color) {
@@ -371,6 +371,74 @@ function applyGenderColors(sheet, col, startRow, maxRows) {
 function submitStudentToProject(fullName, projectName) {
   const { grade, gender } = getStudentGradeGender(fullName);
   return writeStudentToProject(fullName, projectName, grade, gender);
+}
+/**********************
+ * Read All groups
+ **********************/
+ function readAllGroups() {
+  const sheet = getTargetSheet();
+  const startRow = 3;
+  const maxRows = 16;
+  const groups = {};
+  const map = getProjectColumnMap();
+
+  Object.entries(map).forEach(([project, col]) => {
+    const values = sheet.getRange(startRow, col + 1, maxRows, 2).getValues();
+
+    groups[project] = values.filter(r => r[0]).map(r => {
+      const rawName = [r[0], r[1]]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+
+      if (!rawName.includes(" ")) {
+        throw new Error(
+          "Invalid student name in project '" + project + "': " + rawName
+        );
+      }
+
+      const info = getStudentGradeGender(rawName);
+
+      return {
+        name: rawName,
+        gender: (info.gender || "").toString().toLowerCase(),
+        grade: info.grade || ""
+      };
+    });
+  });
+
+  return groups;
+}
+
+/**********************
+ * Write Balanced groups
+ **********************/
+function writeBalancedGroups(groups) {
+  const sheet = getTargetSheet();
+  const map = getProjectColumnMap();
+  const startRow = 3;
+  const maxRows = 16;
+
+  Object.entries(groups).forEach(([project, students]) => {
+    const col = map[project];
+
+    // clear old data
+    sheet.getRange(startRow, col + 1, maxRows, 2).clearContent();
+
+    // write new
+    students.slice(0, maxRows).forEach((s, i) => {
+      sheet.getRange(startRow + i, col + 1).setValue(s.name);
+      sheet.getRange(startRow + i, col + 2).setValue(s.grade);
+    });
+
+    // reapply formatting
+    setGradeConditionalFormatting(sheet, col);
+  });
+
+  // reapply gender colors for all
+  Object.entries(map).forEach(([project, col]) => {
+    applyGenderColors(sheet, col, startRow, maxRows);
+  });
 }
 
 /**********************
