@@ -251,10 +251,11 @@ function getStudentGradeGender(fullName) {
 
     if (!first || !last) continue;
 
-    const combined = normalizeName(`${last} ${first}`); // Last First
-    if (combined === key) {
+      const normalizedFirstLast = normalizeName(`${first} ${last}`);
+      if (combined === key || normalizedFirstLast === key) {
       return { grade: grade || "", gender: (gender || "").toString() };
     }
+
   }
 
   throw new Error("Student info not found: " + fullName);
@@ -303,9 +304,9 @@ function writeStudentToProject(fullName, projectName, grade, gender) {
 
   // Set gender color manually (kept from original)
   const genderColor =
-    (gender || "").toString().toLowerCase() === "female"
+    (gender || "").toString().toLowerCase() === "f"
       ? "#ff000033"
-      : (gender || "").toString().toLowerCase() === "male"
+      : (gender || "").toString().toLowerCase() === "m"
       ? "#0000ff33"
       : "#ffffff00"; // transparent if missing
   sheet.getRange(insertRow, col + 1).setBackground(genderColor);
@@ -352,8 +353,8 @@ function applyGenderColors(sheet, col, startRow, maxRows) {
     }
 
     const color =
-      gender === "F" ? "#ff000033" :
-      gender === "M"   ? "#0000ff33" :
+      gender === "f" ? "#ff000033" :
+      gender === "m"   ? "#0000ff33" :
       null;
 
     if (color) {
