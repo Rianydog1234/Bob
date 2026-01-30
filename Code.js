@@ -373,3 +373,288 @@ function submitStudentToProject(fullName, projectName) {
   return writeStudentToProject(fullName, projectName, grade, gender);
 }
 
+/**********************
+ * READ ALL GROUPS
+ **********************/
+function readAllGroups() {
+  const sheet = getTargetSheet();
+
+  const startRow = 3;
+  const maxRows = 16;
+  const groups = {};
+  const map = getProjectColumnMap();
+
+  Object.entries(map).forEach(([name, col]) => {
+    const values = sheet.getRange(startRow, col + 1, maxRows, 2).getValues();
+
+    groups[name] = values
+      .filter(r => r[0])
+      .map(r => {
+        const info = getStudentGradeGender(r[0]);
+        return {
+          name: r[0],
+          gender: (info.gender || "").toString().toLowerCase(),
+          grade: info.grade || ""
+        };
+      });
+  });
+
+  return groups;
+}
+
+/**********************
+ * ANALYZE GROUP
+ **********************/
+function analyzeGroup(group) {
+  let girls = 0, boys = 0, g2 = 0, g3 = 0;
+
+  group.forEach(s => {
+    if ((s.gender || "").toLowerCase() === "female") girls++;
+    if ((s.gender || "").toLowerCase() === "male") boys++;
+    if ((s.grade || "").toString().startsWith("2")) g2++;
+    if ((s.grade || "").toString().startsWith("3")) g3++;
+  });
+
+  return {
+    girls, boys, g2, g3,
+    extraGirls: girls - boys,
+    extraGrades: g3 - g2
+  };
+}
+
+/**********************
+ * WRITE GROUPS BACK
+ **********************/
+function writeBalancedGroups(groups) {
+  const sheet = getTargetSheet();
+  const map = getProjectColumnMap();
+
+  const startRow = 3;
+  const maxRows = 16;
+
+  Object.entries(groups).forEach(([group, students]) => {
+    const col = map[group];
+
+    sheet.getRange(startRow, col + 1, maxRows, 2).clearContent();
+
+    students.slice(0, 16).forEach((s, i) => {
+      sheet.getRange(startRow + i, col + 1).setValue(s.name);
+      sheet.getRange(startRow + i, col + 2).setValue(s.grade);
+    });
+
+    // Re-apply conditional formatting for the grade column
+    setGradeConditionalFormatting(sheet, col);
+  });
+
+  // After writing everything, reapply gender colors to be deterministic
+  Object.entries(map).forEach(([project, col]) => {
+    applyGenderColors(sheet, col, startRow, maxRows);
+  });
+}
+
+
+/**********************
+ * PROJECT HISTORY MAP (safe)
+ **********************/
+function getWasOnProjectMap() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName("WasOnProject");
+  if (!sheet) {
+    sheet = ss.insertSheet("WasOnProject");
+    sheet.appendRow(["Name", "Project", "Date"]);
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const map = {};
+
+  for (let r = 1; r < data.length; r++) {
+    const rawName = data[r][0];
+    if (!rawName) continue;
+    const name = normalizeName(rawName);
+    const project = (data[r][1] || "").toString();
+    if (!map[name]) map[name] = [];
+    if (project && !map[name].includes(project)) map[name].push(project);
+  }
+  return map;
+}
+
+/**********************
+ * ARCHIVE CLOSED SHEET (append only non-duplicates)
+ **********************/
+function archiveClosedSheet() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName("WasOnProject");
+  if (!sheet) {
+    sheet = ss.insertSheet("WasOnProject");
+    sheet.appendRow(["Name", "Project", "Date"]);
+  }
+
+  const history = getWasOnProjectMap(); // existing
+  const groups = readAllGroups();
+
+  Object.entries(groups).forEach(([project, students]) => {
+    students.forEach(s => {
+      const key = normalizeName(s.name);
+      // only append if this project not already recorded for the student
+      if (!(history[key] || []).includes(project)) {
+        sheet.appendRow([s.name, project, new Date()]);
+      }
+    });
+  });
+}
+
+/*******
+ * NEW THINGS
+ */
+const MAX_STUDENTS = 16;
+const MIN_STUDENTS = 15;
+const MAX_GENDER_DIFF = 2;
+const MAX_GRADE_DIFF = 3;
+const MAX_SHUFFLE_PASSES = 20;
+/****
+ * Analyze group
+ */
+function analyzeGroup(group) {
+  let girls = 0, boys = 0, g2 = 0, g3 = 0;
+
+  group.forEach(s => {
+    if (s.gender === "F") girls++;
+    else boys++;
+
+    if (s.grade.startsWith("2")) g2++;
+    else if (s.grade.startsWith("3")) g3++;
+  });
+
+  return {
+    total: group.length,
+    girls,
+    boys,
+    g2,
+    g3,
+    genderDiff: Math.abs(girls - boys),
+    gradeDiff: Math.abs(g2 - g3),
+    valid:
+      group.length >= MIN_STUDENTS &&
+      group.length <= MAX_STUDENTS &&
+      Math.abs(girls - boys) <= MAX_GENDER_DIFF &&
+      Math.abs(g2 - g3) <= MAX_GRADE_DIFF
+  };
+}
+/**
+ * Project map
+ */
+function buildHistoryMapFromWasOnProject() {
+  const sh = getWasOnProjectSheet();
+  const rows = sh.getDataRange().getValues().slice(1);
+  const history = {};
+
+  rows.forEach(([name, project]) => {
+    if (!history[name]) history[name] = {};
+    history[name][project] = true;
+  });
+
+  return history;
+}
+/***\
+ * Shuffle projects randomly
+ */
+function shuffleProjectsRandomly(groups, history) {
+  const projectNames = Object.keys(groups);
+
+  for (let pass = 0; pass < MAX_SHUFFLE_PASSES; pass++) {
+    let changed = false;
+
+    projectNames.forEach(p1 => {
+      projectNames.forEach(p2 => {
+        if (p1 === p2) return;
+
+        const g1 = groups[p1];
+        const g2 = groups[p2];
+
+        const a1 = analyzeGroup(g1);
+        const a2 = analyzeGroup(g2);
+
+        if (a1.valid && a2.valid) return;
+
+        // Randomize candidate order
+        const c1 = [...g1].sort(() => Math.random() - 0.5);
+        const c2 = [...g2].sort(() => Math.random() - 0.5);
+
+        for (const s1 of c1) {
+          for (const s2 of c2) {
+            // HARD RULE: no history violations
+            if (
+              history[s1.name]?.[p2] ||
+              history[s2.name]?.[p1]
+            ) continue;
+
+            // Simulate swap
+            const newG1 = g1.filter(s => s !== s1).concat(s2);
+            const newG2 = g2.filter(s => s !== s2).concat(s1);
+
+            const na1 = analyzeGroup(newG1);
+            const na2 = analyzeGroup(newG2);
+
+            // Accept if it improves or fixes something
+            if (
+              na1.genderDiff <= a1.genderDiff &&
+              na2.genderDiff <= a2.genderDiff &&
+              na1.gradeDiff <= a1.gradeDiff &&
+              na2.gradeDiff <= a2.gradeDiff &&
+              newG1.length <= MAX_STUDENTS &&
+              newG2.length <= MAX_STUDENTS
+            ) {
+              groups[p1] = newG1;
+              groups[p2] = newG2;
+              changed = true;
+              return;
+            }
+          }
+        }
+      });
+    });
+
+    if (!changed) break;
+  }
+
+  return groups;
+}
+
+/****\
+ * Shuffle with rules
+ */
+function shuffleWithRules() {
+  const groups = readAllGroups(); // your existing function
+  const history = buildHistoryMapFromWasOnProject();
+
+  const balanced = shuffleProjectsRandomly(groups, history);
+
+  // Final hard validation
+  Object.entries(balanced).forEach(([project, students]) => {
+    students.forEach(s => {
+      if (history[s.name]?.[project]) {
+        throw new Error(
+          `History violation: ${s.name} already did ${project}`
+        );
+      }
+    });
+  });
+
+  writeAllGroups(balanced); // your existing writer
+  return true;
+}
+/****
+ * Admin close sheet
+ */
+function adminCloseSheet() {
+  try {
+    shuffleWithRules();
+    archiveClosedSheet(); // your existing function
+    return { ok: true, message: "Shuffle & close completed successfully." };
+  } catch (e) {
+    return { ok: false, message: e.message || e.toString() };
+  }
+}
+
+
+
