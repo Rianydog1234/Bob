@@ -527,7 +527,7 @@ function createNewTargetSheetFromTemplate(newName) {
  *
  * - reads current assignments
  * - commits them into the first configured SHEET_GIDS sheet (so dynamic history picks them up)
- * - creates a new blank sheet and sets it as active target
+ * - creates a new blank sheet and sets it as active target 
  * - clears the new sheet's project blocks so the admin has a fresh board
  */
 function closeCreateNewTarget() {
