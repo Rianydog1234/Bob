@@ -265,7 +265,7 @@ function submitSelection() {
         showMessage("Error: " + (err.message || err.toString()), false);
         appendLog("RPC failure: " + (err.message || err.toString()));
       })
-      .createNewTargetSheet(); // Calls your server-side function
+      .adminCloseAndCreateNewTarget(); // Calls your server-side function
   };
 </script>
 
