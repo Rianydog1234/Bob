@@ -7,7 +7,7 @@
 
 /* ============= CONFIG ============= */
 const SPREADSHEET_ID = ""; // "" => use active spreadsheet; otherwise set explicit id
-const SHEET_GIDS = [681181988, 1493058526, 1220633850, 1521986569];
+const SHEET_GIDS = [681181988, 1493058526, 1220633850, 1521986569, 1521986569];
 const PROJECT_COLUMNS = [1, 3, 5, 7, 9, 11]; // zero-based offsets where project names appear in row 2
 const SOURCE_INFO_SHEET_GID = 1446473767;
 const MAX_STUDENTS = 16;
@@ -327,6 +327,7 @@ function writeStudentToProject(fullName, projectName, grade, gender) {
   else if (gradeUpper === "2B") gradeCell.setBackground("#a4c2f4");
   else if (gradeUpper === "3A") gradeCell.setBackground("#ffe599");
   else if (gradeUpper === "3B") gradeCell.setBackground("#ea9999");
+  try { sortProjectBlock(target, col); } catch (e) { Logger.log("sortProjectBlock failed: " + e.toString()); }
   return { ok: true, message: `Wrote ${fullName} to ${projectName} at row ${writeRow}` };
 }
 
@@ -526,6 +527,118 @@ function gradeKey(g){
   if(!g) return 999;
   g = g.toString().trim().toUpperCase();
   return GRADE_ORDER[g] || 999;
+}
+/**
+ * Sort the project block (name + grade) in-place for the provided sheet/col.
+ * - sheet: Sheet object
+ * - col: zero-based index from PROJECT_COLUMNS (same mapping used elsewhere)
+ *
+ * Uses gradeKey() already defined in THEBLOB.js for ordering.
+ */
+
+/**
+ * Sort the project block (name + grade) in-place and preserve cell backgrounds.
+ * - sheet: Sheet object
+ * - col: zero-based index from PROJECT_COLUMNS (same mapping used elsewhere)
+ *
+ * Behavior:
+ * - Reads the block values and backgrounds.
+ * - Builds queues of backgrounds keyed by student name (handles duplicate names).
+ * - Sorts rows by gradeKey() then name.
+ * - Writes sorted values back and reassigns backgrounds so colours move with students.
+ */
+function sortProjectBlock(sheet, col) {
+  if (col === undefined || col === null) return;
+
+  var startRow = 3;
+  var maxRows = (typeof MAX_STUDENTS !== "undefined" && MAX_STUDENTS) ? MAX_STUDENTS : 100;
+
+  var range = sheet.getRange(startRow, col + 1, maxRows, 2); // name, grade
+  var values = range.getValues();           // [[name,grade],...]
+  var bgs = range.getBackgrounds();        // [[nameBg,gradeBg],...]
+
+  // Build list of populated rows
+  var populated = [];
+  for (var i = 0; i < values.length; i++) {
+    var name = (values[i][0] || "").toString().trim();
+    var grade = (values[i][1] || "").toString().trim();
+    if (name) populated.push({ name: name, grade: grade });
+  }
+
+  // If nothing to sort, still ensure backgrounds for blanks are cleared (optional)
+  if (populated.length === 0) {
+    // clear any stray backgrounds in this block (optional)
+    try {
+      sheet.getRange(startRow, col + 1, maxRows, 2).setBackgrounds(
+        (function() { var arr = []; for (var k=0;k<maxRows;k++) arr.push(["",""]); return arr; })()
+      );
+    } catch (e) { /* ignore */ }
+    return;
+  }
+
+  // Build background queues keyed by name from the original block (preserve occurrence order)
+  var nameBgQueue = {};   // name -> [bg1, bg2, ...]
+  var gradeBgQueue = {};  // name -> [bg1, bg2, ...]
+  for (var j = 0; j < values.length; j++) {
+    var origName = (values[j][0] || "").toString().trim();
+    if (!origName) continue;
+    if (!nameBgQueue[origName]) nameBgQueue[origName] = [];
+    if (!gradeBgQueue[origName]) gradeBgQueue[origName] = [];
+    // push the background values so duplicates get preserved in order
+    nameBgQueue[origName].push(bgs[j][0] || "");
+    gradeBgQueue[origName].push(bgs[j][1] || "");
+  }
+
+  // Sort populated rows by gradeKey then name
+  populated.sort(function(a, b) {
+    var ka = gradeKey(a.grade);
+    var kb = gradeKey(b.grade);
+    if (ka !== kb) return ka - kb;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+
+  // Build output values and the matching background arrays (2D arrays)
+  var outValues = [];
+  var outNameBgs = [];
+  var outGradeBgs = [];
+
+  for (var m = 0; m < maxRows; m++) {
+    if (m < populated.length) {
+      var p = populated[m];
+      outValues.push([p.name, p.grade]);
+
+      // pop one background for this name (or empty string if none)
+      var nBg = "";
+      var gBg = "";
+      if (nameBgQueue[p.name] && nameBgQueue[p.name].length) nBg = nameBgQueue[p.name].shift();
+      if (gradeBgQueue[p.name] && gradeBgQueue[p.name].length) gBg = gradeBgQueue[p.name].shift();
+
+      outNameBgs.push([nBg]);
+      outGradeBgs.push([gBg]);
+    } else {
+      outValues.push(["", ""]);
+      outNameBgs.push([""]);
+      outGradeBgs.push([""]);
+    }
+  }
+
+  // Write sorted values back
+  range.setValues(outValues);
+
+  // Apply backgrounds for the two columns separately
+  try {
+    var nameRange = sheet.getRange(startRow, col + 1, maxRows, 1);
+    var gradeRange = sheet.getRange(startRow, col + 2, maxRows, 1);
+    nameRange.setBackgrounds(outNameBgs);
+    gradeRange.setBackgrounds(outGradeBgs);
+  } catch (e) {
+    Logger.log("sortProjectBlock: failed to set backgrounds: " + e.toString());
+  }
+
+  // (Optional) Reapply CF for grade column if you use CF rules elsewhere
+  try { setGradeConditionalFormatting(sheet, col); } catch (e) { /* ignore */ }
+
+  return;
 }
 
 function submitStudent(name, grade, project){
