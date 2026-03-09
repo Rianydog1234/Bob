@@ -311,11 +311,22 @@ function writeStudentToProject(fullName, projectName, grade, gender) {
 
   target.getRange(writeRow, col + 1).setValue(fullName);
   target.getRange(writeRow, col + 2).setValue(grade || "");
+
+  // gender coloring (same as before)
   const gLower = (gender || "").toString().toLowerCase();
   if (gLower) {
     if (gLower.indexOf("f") === 0) target.getRange(writeRow, col + 1).setBackground("#ffebee");
     else if (gLower.indexOf("m") === 0) target.getRange(writeRow, col + 1).setBackground("#e8f0fe");
   }
+
+  // grade coloring (NEW)
+  const gradeUpper = (grade || "").toString().toUpperCase();
+  const gradeCell = target.getRange(writeRow, col + 2);
+
+  if (gradeUpper === "2A") gradeCell.setBackground("#b6d7a8");
+  else if (gradeUpper === "2B") gradeCell.setBackground("#a4c2f4");
+  else if (gradeUpper === "3A") gradeCell.setBackground("#ffe599");
+  else if (gradeUpper === "3B") gradeCell.setBackground("#ea9999");
   return { ok: true, message: `Wrote ${fullName} to ${projectName} at row ${writeRow}` };
 }
 
@@ -435,6 +446,9 @@ function createNewTargetSheetFromTemplate(newName) {
   PROJECT_COLUMNS.forEach(col => {
     newSheet.getRange(startRow, col + 1, maxRows, 2).clearContent().clearFormat();
   });
+  PROJECT_COLUMNS.forEach(col => {
+  try { setGradeConditionalFormatting(newSheet, col); } catch (e) { Logger.log("createNewTarget CF: " + e.toString()); }
+});
   return newSheet;
 }
 
@@ -453,12 +467,22 @@ function closeCreateNewTarget() {
 }
 
 /* ============= Balanced write & formatting ============= */
-// ---- replace existing setGradeConditionalFormatting ----
+/**
+ * Replace existing setGradeConditionalFormatting in THEBLOB.js with this.
+ * - sheet: Google Sheet object
+ * - col: zero-based index from PROJECT_COLUMNS (same mapping used elsewhere)
+ *
+ * This version uses the same whenTextEqualTo rules as Code.js (works nicely for exact text).
+ */
+// REPLACE: existing setGradeConditionalFormatting with this
 function setGradeConditionalFormatting(sheet, col) {
-  // col is the zero-based PROJECT_COLUMNS index (matches getProjectColumnMapForSheet)
+  // defensive: col is the zero-based PROJECT_COLUMNS index
+  if (col === undefined || col === null) return;
+
   const rules = sheet.getConditionalFormatRules() || [];
-  const gradeCol = col + 2; // grade is the second column of the pair (name, grade)
-  // remove any existing rules that overlap the grade column
+  const gradeCol = col + 2; // 1-based grade column index
+
+  // remove any existing rules that target/overlap this grade column
   const filteredRules = rules.filter(rule => {
     const ranges = rule.getRanges() || [];
     return !ranges.some(r => {
@@ -469,37 +493,30 @@ function setGradeConditionalFormatting(sheet, col) {
   });
 
   const startRow = 3;
-  const maxRows = 100;
+  const maxRows = 100; // you can tighten to MAX_STUDENTS if you prefer
   const gradeRange = sheet.getRange(startRow, gradeCol, maxRows, 1);
 
-  // helper: convert column number -> letter (1 -> A)
-  function colToLetter(colNum) {
-    let s = "";
-    while (colNum > 0) {
-      const m = (colNum - 1) % 26;
-      s = String.fromCharCode(65 + m) + s;
-      colNum = Math.floor((colNum - 1) / 26);
-    }
-    return s;
-  }
-  const colLetter = colToLetter(gradeCol);
-
-  // We'll use formula-based rules so matching is case-insensitive and ignores whitespace.
-  // The formula references the first row of the range (startRow), and locks the column:
-  // e.g. '=TRIM(UPPER($C3))="2A"'
   const newRules = [
     SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=TRIM(UPPER($${colLetter}${startRow}))="2A"`)
-      .setBackground('#b6d7a8').setRanges([gradeRange]).build(),
+      .whenTextEqualTo('2A')
+      .setBackground('#b6d7a8')
+      .setRanges([gradeRange])
+      .build(),
     SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=TRIM(UPPER($${colLetter}${startRow}))="2B"`)
-      .setBackground('#a4c2f4').setRanges([gradeRange]).build(),
+      .whenTextEqualTo('2B')
+      .setBackground('#a4c2f4')
+      .setRanges([gradeRange])
+      .build(),
     SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=TRIM(UPPER($${colLetter}${startRow}))="3A"`)
-      .setBackground('#ffe599').setRanges([gradeRange]).build(),
+      .whenTextEqualTo('3A')
+      .setBackground('#ffe599')
+      .setRanges([gradeRange])
+      .build(),
     SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=TRIM(UPPER($${colLetter}${startRow}))="3B"`)
-      .setBackground('#ea9999').setRanges([gradeRange]).build()
+      .whenTextEqualTo('3B')
+      .setBackground('#ea9999')
+      .setRanges([gradeRange])
+      .build()
   ];
 
   sheet.setConditionalFormatRules(filteredRules.concat(newRules));
@@ -512,36 +529,41 @@ function gradeKey(g){
 }
 
 function submitStudent(name, grade, project){
-
   const sheet = getTargetSheet();
   const map = getProjectColumnMapForSheet(sheet);
-
   const col = map[project];
-  if(!col) return;
+  if (col === undefined || col === null) return { ok:false, message: "project not found" };
 
-  const nameCol = col+1;
-  const gradeCol = col+2;
+  const startRow = 3;
+  const maxRows = MAX_STUDENTS || 100;
 
-  // find first empty row
-  let row = START_ROW;
-  for(let i=0;i<MAX_ROWS;i++){
-    const v = sheet.getRange(START_ROW+i,nameCol).getValue();
-    if(!v){
-      row = START_ROW+i;
-      break;
-    }
+  // read existing block (name, grade)
+  const blockRange = sheet.getRange(startRow, col + 1, maxRows, 2);
+  const block = blockRange.getValues();
+
+  // collect non-empty rows
+  const filled = block
+    .filter(r => (r[0] || "").toString().trim())
+    .map(r => ({ name: r[0].toString().trim(), grade: (r[1] || "").toString().trim() }));
+
+  // add new entry and sort by grade order
+  filled.push({ name: name, grade: (grade || "").toString() });
+  filled.sort((a, b) => gradeKey(a.grade) - gradeKey(b.grade));
+
+  // prepare output rows with blanks after filled entries
+  const out = [];
+  for (let i = 0; i < maxRows; i++) {
+    if (i < filled.length) out.push([filled[i].name, filled[i].grade]);
+    else out.push(["", ""]);
   }
 
-  grade = grade.trim().toUpperCase();
+  // write back block
+  blockRange.setValues(out);
 
-  sheet.getRange(row,nameCol).setValue(name);
-  sheet.getRange(row,gradeCol).setValue(grade);
+  // reapply conditional formatting for this project column
+  try { setGradeConditionalFormatting(sheet, col); } catch (e) { Logger.log("submitStudent CF: " + e.toString()); }
 
-  applyGenderColors(sheet,nameCol,row);
-  applyGradeFormatting(sheet,gradeCol);
-
-  sortProject(sheet,nameCol,gradeCol);
-
+  return { ok: true, message: `Inserted ${name} into "${project}" and sorted (${filled.length} rows now)` };
 }
 
 function sortProject(sheet,nameCol,gradeCol){
