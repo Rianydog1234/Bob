@@ -76,41 +76,34 @@ function checkAdminAccess() {
 /*SWAP NAMES --*/
 function swapNameIfNeeded(name, sheetIdentifier) {
   if (!name) return "";
-
   const raw = String(name).trim();
-  // 1) If "Last, First" style, convert to "First Last" (explicit comma)
+
+  // handle "Last, First" formats
   if (raw.indexOf(",") !== -1) {
     const parts = raw.split(",").map(s => s.trim()).filter(Boolean);
     if (parts.length >= 2) return (parts[1] + " " + parts[0]).trim();
     return raw;
   }
 
-  // Known problematic sheet GIDs where the source uses "first last" ordering incorrectly
   const PROBLEMATIC_GIDS = [1493058526, 1220633850];
 
-  // Determine whether to swap based on sheetIdentifier:
-  // - if it's equal to 1 or 2 (legacy index), swap (preserves old logic)
-  // - if it matches one of the PROBLEMATIC_GIDS, swap
+  // Determine whether to swap
   let shouldSwap = false;
-  if (typeof sheetIdentifier !== "undefined" && sheetIdentifier !== null) {
+  if (sheetIdentifier != null) {
     const n = Number(sheetIdentifier);
-    if (!isNaN(n)) {
-      if (n === 1 || n === 2) shouldSwap = true;            // legacy index behavior
-      if (PROBLEMATIC_GIDS.indexOf(n) !== -1) shouldSwap = true; // explicit gid match
+    if (!isNaN(n) && (PROBLEMATIC_GIDS.indexOf(n) !== -1 || n === 1 || n === 2)) {
+      shouldSwap = true;
     }
   }
 
   if (shouldSwap) {
     const parts = raw.split(/\s+/).filter(Boolean);
     if (parts.length < 2) return raw;
-    // Swap first and last token: "First Middle Last" -> "Middle Last First"
-    // (keeps everything but moves first token to the end to replicate simple swap)
     return (parts.slice(1).join(" ") + " " + parts[0]).trim();
   }
 
   return raw;
 }
-
 /* ============= UTILITIES ============= */
 function getSpreadsheet() {
   if (typeof SPREADSHEET_ID !== 'undefined' && SPREADSHEET_ID && String(SPREADSHEET_ID).trim()) {
@@ -128,30 +121,6 @@ function normalizeName(name) {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
-}
-
-/**
- * swapNameIfNeeded(name, sheetIndex)
- * - If name contains comma "Last, First" => returns "First Last"
- * - If sheetIndex is set to legacy indices where order was reversed, swap.
- * - Otherwise returns original trimmed name.
- * This preserves compatibility with original repo where some source sheets had Last First order.
- */
-function swapNameIfNeeded(name, sheetIndex) {
-  if (!name) return "";
-  const raw = String(name).trim();
-  // 1) handle "Last, First" formats
-  if (raw.indexOf(",") !== -1) {
-    const parts = raw.split(",").map(s => s.trim()).filter(Boolean);
-    if (parts.length >= 2) return (parts[1] + " " + parts[0]).trim();
-    return raw;
-  }
-  // 2) legacy sheet index-based swap (keeps original behavior)
-  if (typeof sheetIndex !== 'undefined' && (sheetIndex === 1 || sheetIndex === 2)) {
-    const parts = raw.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) return (parts.slice(1).join(" ") + " " + parts[0]).trim();
-  }
-  return raw;
 }
 
 /* ============= ScriptConfig helpers ============= */
