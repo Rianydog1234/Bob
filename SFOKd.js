@@ -936,305 +936,385 @@ function adminCloseSheet() {
 function adminCloseAndCreateNewTarget() { try { const res = closeCreateNewTarget(); return { ok:true, message: res.message, log: res.commitLog }; } catch (e) { return { ok:false, message: e.message || e.toString() }; } }
 function adminSetExistingTarget(gid) { try { const ss = getSpreadsheet(); const sheet = ss.getSheets().find(s => s.getSheetId() === Number(gid)); if (!sheet) throw new Error("Sheet with gid " + gid + " not found."); setTargetSheetId(Number(gid)); try { getConfigSheet().getRange(1,3).clearContent(); } catch(e){} return { ok:true, message: `Set active target to gid=${gid} (${sheet.getName()})` }; } catch (e) { return { ok:false, message: e.message || String(e) }; } }
 
-/* ============= Debug functions ============= */
+/*================ Signing in missing students*/
 /**
- * runCloseSheetDebug
- * Read-only diagnostic for the "close sheet -> save to history" flow.
- * Run from the Apps Script editor (select runCloseSheetDebug and Run).
- *
- * This collects:
- *  - resolved target sheet
- *  - project headers (row 2) and assignments (rows 3..lastRow)
- *  - candidate history/archive sheets and sample content
- *  - normalization-matching between current assignments and history rows
- *  - presence/absence of functions involved in the close/save flow
- *
- * DOES NOT MODIFY ANY SHEET.
+ * getAllRegisteredStudents()
+ * 
+ * 
  */
-function runCloseSheetDebug() {
-  var out = {
-    generatedAt: new Date().toISOString(),
-    warnings: [],
-    info: {}
-  };
+/* ---------- Auto-assign helpers (drop-in) ---------- */
 
-  function safeRun(name, fn) {
-    try { return { ok: true, value: fn() }; } catch (e) { return { ok: false, error: String(e && e.stack ? e.stack : e) }; }
+/**
+ * getAllRegisteredStudents()
+ * - Reads the SOURCE_INFO_SHEET (canonical students list)
+ * - Returns array of { fullName, normalized }
+ */
+function getAllRegisteredStudents() {
+  const ss = getSpreadsheet();
+  const sheets = ss.getSheets();
+  const infoSheet = sheets.find(s => s.getSheetId && s.getSheetId() === Number(SOURCE_INFO_SHEET_GID));
+  if (!infoSheet) throw new Error("getAllRegisteredStudents: info sheet not found (gid=" + SOURCE_INFO_SHEET_GID + ")");
+  const data = infoSheet.getDataRange().getValues();
+  const students = [];
+  for (let r = 1; r < data.length; r++) {
+    const last = (data[r][0] || "").toString().trim();
+    const first = (data[r][1] || "").toString().trim();
+    if (!last && !first) continue;
+    const full = (first && last) ? (first + " " + last) : (first || last);
+    const norm = normalizeName(full);
+    students.push({ fullName: full, normalized: norm });
   }
-
-  // small normalizer used for name matching (matches NAME.js behaviour)
-  function normalizeNameForDebug(s) {
-    if (s === null || typeof s === "undefined") return "";
-    var t = "" + s;
-    if (t.normalize) t = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    t = t.replace(/\s+/g, " ").trim().toLowerCase();
-    return t;
-  }
-
-  // 1) Spreadsheet resolution (respect SPREADSHEET_ID if set, fallback to active)
-  out.info.spreadsheet = safeRun("resolveSpreadsheet", function () {
-    var ss;
-    if (typeof SPREADSHEET_ID !== "undefined" && SPREADSHEET_ID) {
-      ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    } else {
-      ss = SpreadsheetApp.getActiveSpreadsheet();
-    }
-    return { id: ss.getId(), name: ss.getName(), url: ss.getUrl() };
-  });
-
-  if (!out.info.spreadsheet.ok) {
-    Logger.log(JSON.stringify(out, null, 2));
-    return out;
-  }
-
-  var ss = (typeof SPREADSHEET_ID !== "undefined" && SPREADSHEET_ID)
-    ? SpreadsheetApp.openById(SPREADSHEET_ID)
-    : SpreadsheetApp.getActiveSpreadsheet();
-
-  // 2) list sheets
-  out.info.sheets = ss.getSheets().map(function (sh) {
-    return { name: sh.getName(), gid: sh.getSheetId(), lastRow: sh.getLastRow(), lastCol: sh.getLastColumn() };
-  });
-
-  // 3) read ScriptConfig A1/B1 if present
-  out.info.scriptConfig = safeRun("scriptConfig", function () {
-    var cfg = {};
-    var sh = ss.getSheetByName("ScriptConfig") || ss.getSheets().find(function(s){ return s.getName().toLowerCase() === "scriptconfig"; });
-    if (!sh) return { exists: false };
-    cfg.exists = true;
-    cfg.A1 = sh.getRange(1,1).getDisplayValue();
-    cfg.B1 = sh.getRange(1,2).getDisplayValue();
-    return cfg;
-  });
-
-  // 4) computed target sheet (try getTargetSheet() if it exists)
-  out.info.targetSheet = safeRun("targetSheetResolve", function () {
-    if (typeof getTargetSheet === "function") {
-      var t = getTargetSheet();
-      if (!t) return { note: "getTargetSheet() returned null/undefined" };
-      return { name: t.getName(), gid: t.getSheetId(), lastRow: t.getLastRow(), lastCol: t.getLastColumn() };
-    }
-    // fallback: use ScriptConfig B1 numeric gid if present
-    var gidRaw = (out.info.scriptConfig.ok && out.info.scriptConfig.value && out.info.scriptConfig.value.B1) ? out.info.scriptConfig.value.B1 : null;
-    if (gidRaw) {
-      var gid = parseInt(gidRaw, 10);
-      var found = ss.getSheets().find(function(sh){ return sh.getSheetId() === gid; });
-      if (found) return { name: found.getName(), gid: found.getSheetId(), lastRow: found.getLastRow(), lastCol: found.getLastColumn() };
-      return { error: "ScriptConfig B1 provided gid but sheet not found: " + gidRaw };
-    }
-    // fallback: first non-ScriptConfig sheet
-    var fallback = ss.getSheets().find(function(sh){ return sh.getName().toLowerCase() !== "scriptconfig"; });
-    if (fallback) return { name: fallback.getName(), gid: fallback.getSheetId(), lastRow: fallback.getLastRow(), lastCol: fallback.getLastColumn(), note: "fallback to first non-ScriptConfig sheet" };
-    return { error: "No usable target sheet found" };
-  });
-
-  // 5) read project headers (row 2) and assignments (rows 3..lastRow)
-  out.info.targetData = safeRun("targetData", function () {
-    var tsObj = out.info.targetSheet.ok ? out.info.targetSheet.value : null;
-    if (!tsObj || !tsObj.gid) throw new Error("No target sheet resolved");
-    var targetSheet = ss.getSheets().find(function(sh){ return sh.getSheetId() === tsObj.gid; });
-    if (!targetSheet) throw new Error("Target sheet object not found by gid");
-
-    var lastCol = Math.max(1, targetSheet.getLastColumn());
-    var lastRow = Math.max(3, targetSheet.getLastRow());
-    var headers = targetSheet.getRange(2, 1, 1, lastCol).getDisplayValues()[0];
-    // read rows 3..lastRow, all columns
-    var rows = [];
-    if (lastRow >= 3) {
-      var numRows = lastRow - 2;
-      var rvals = targetSheet.getRange(3, 1, numRows, lastCol).getDisplayValues();
-      rvals.forEach(function (r, i) {
-        rows.push(r);
-      });
-    }
-    // build project -> students map (collect non-empty cells per header)
-    var projects = {};
-    for (var c = 0; c < headers.length; c++) {
-      var rawHeader = headers[c] || "";
-      var headerTrim = (""+rawHeader).toString().trim();
-      if (!headerTrim) continue;
-      projects[headerTrim] = [];
-    }
-    // iterate rows, collect names per column where header exists
-    for (var rr = 0; rr < rows.length; rr++) {
-      for (var c2 = 0; c2 < headers.length; c2++) {
-        var hdr = (headers[c2] || "").toString().trim();
-        if (!hdr) continue;
-        var cell = rows[rr][c2];
-        if (cell !== null && (""+cell).toString().trim() !== "") {
-          projects[hdr].push({ raw: cell, normalized: normalizeNameForDebug(cell), rowIndex: rr + 3, colIndex: c2 + 1 });
-        }
-      }
-    }
-    return { headers: headers, lastRow: lastRow, lastCol: lastCol, projects: projects, sampleRows: rows.slice(0,8) };
-  });
-
-  // 6) find candidate history/archive sheets (common names + contains)
-  out.info.historyCandidates = safeRun("historyCandidates", function () {
-    var candidates = ["WasOnProject", "History", "Archive", "WasOnProject Archive", "WasOnProject_old", "WasOnProject_Archive", "WasOnProject (Archive)"];
-    // also include any sheet that contains history/was/archive
-    var dynamic = ss.getSheets().map(function(sh){ return sh.getName(); }).filter(function(n){ return /history|was|archive/i.test(n); });
-    var unique = {};
-    (candidates.concat(dynamic)).forEach(function(n){ unique[n] = true; });
-    var names = Object.keys(unique);
-    // return those that exist and a sample from each
-    var found = [];
-    names.forEach(function(name) {
-      var sh = ss.getSheetByName(name);
-      if (!sh) {
-        // try case-insensitive
-        var maybe = ss.getSheets().find(function(s){ return s.getName().toLowerCase() === (""+name).toLowerCase(); });
-        if (maybe) sh = maybe;
-      }
-      if (!sh) return;
-      var lastRow = Math.max(1, sh.getLastRow());
-      var lastCol = Math.max(1, sh.getLastColumn());
-      var sampleRangeRows = Math.min(500, lastRow); // limit
-      var data = [];
-      if (sampleRangeRows > 0) {
-        try { data = sh.getRange(1,1, sampleRangeRows, lastCol).getDisplayValues(); } catch(e) { data = [["read error: "+String(e)]]; }
-      }
-      // normalize first two columns (typical structure)
-      var normalizedIndex = {};
-      for (var r = 0; r < Math.min(500, data.length); r++) {
-        var nameCell = data[r] && data[r][0] ? data[r][0] : "";
-        var projCell = data[r] && data[r][1] ? data[r][1] : "";
-        var nn = normalizeNameForDebug(nameCell);
-        if (nn) {
-          if (!normalizedIndex[nn]) normalizedIndex[nn] = [];
-          normalizedIndex[nn].push({ row: r+1, rawName: nameCell, rawProject: projCell });
-        }
-      }
-      found.push({ sheetName: sh.getName(), gid: sh.getSheetId(), lastRow: lastRow, lastCol: lastCol, sampleRowsCount: Math.min(50, data.length), normalizedIndexSampleCount: Object.keys(normalizedIndex).length, normalizedIndexSample: Object.keys(normalizedIndex).slice(0,10), rawSampleFirstRows: data.slice(0,8) });
-    });
-    return found;
-  });
-
-  // 7) For each assigned student in targetData, check presence in history candidates
-  out.info.historyMatching = safeRun("historyMatching", function () {
-    var td = out.info.targetData.ok ? out.info.targetData.value : null;
-    if (!td) return { note: "no target data to test" };
-    var matches = {};
-    var histSheets = out.info.historyCandidates.ok ? out.info.historyCandidates.value : [];
-    var histBySheet = {};
-    // build normalized index for each hist sheet (read limited rows again)
-    histSheets.forEach(function(hs) {
-      var sh = ss.getSheetByName(hs.sheetName) || ss.getSheets().find(function(s){ return s.getSheetId() === hs.gid; });
-      if (!sh) return;
-      var lastRow = Math.max(1, sh.getLastRow());
-      var lastCol = Math.max(1, sh.getLastColumn());
-      var rows = [];
-      try { rows = sh.getRange(1,1, Math.min(1000,lastRow), lastCol).getDisplayValues(); } catch(e) { rows = [["read error: " + String(e)]]; }
-      var idx = {};
-      for (var r = 0; r < rows.length; r++) {
-        var nameCell = rows[r] && rows[r][0] ? rows[r][0] : "";
-        var projCell = rows[r] && rows[r][1] ? rows[r][1] : "";
-        var nn = normalizeNameForDebug(nameCell);
-        if (!nn) continue;
-        if (!idx[nn]) idx[nn] = [];
-        idx[nn].push({ row: r+1, rawName: nameCell, rawProject: projCell });
-      }
-      histBySheet[hs.sheetName] = { gid: hs.gid, index: idx, rawSampleRows: rows.slice(0,8) };
-    });
-
-    // now test each assigned student
-    var summary = { totalAssigned: 0, foundInAnyHistory: 0, foundSameProject: 0, notFound: 0, details: [] };
-    var projects = td.projects || {};
-    Object.keys(projects).forEach(function(projectName) {
-      var list = projects[projectName];
-      list.forEach(function(entry) {
-        summary.totalAssigned++;
-        var nn = entry.normalized;
-        var foundAny = false;
-        var foundSame = false;
-        var foundLocations = [];
-        Object.keys(histBySheet).forEach(function(sheetName) {
-          var idx = histBySheet[sheetName].index;
-          if (idx[nn]) {
-            foundAny = true;
-            idx[nn].forEach(function(hrow) {
-              foundLocations.push({ sheet: sheetName, row: hrow.row, rawProject: hrow.rawProject });
-              if ((hrow.rawProject || "").toString().trim() === projectName) foundSame = true;
-            });
-          }
-        });
-        if (foundAny) summary.foundInAnyHistory++;
-        if (foundSame) summary.foundSameProject++;
-        if (!foundAny) summary.notFound++;
-        summary.details.push({ studentRaw: entry.raw, studentNormalized: nn, project: projectName, foundAny: foundAny, foundSame: foundSame, foundLocations: foundLocations.slice(0,5) });
-      });
-    });
-
-    return { histBySheetSummaryCount: Object.keys(histBySheet).length, summary: summary };
-  });
-
-  // 8) check presence of relevant server functions (so we know what code paths exist)
-  out.info.serverFunctions = {};
-  var fnNames = ["adminCloseSheet","adminCloseAndCreateNewTarget","closeSheet","commitGroupsToSheet","writeStudentToProject","writeHistory","saveHistory","archiveCurrentSheet","moveToHistory"];
-  fnNames.forEach(function(n) {
-    try {
-      out.info.serverFunctions[n] = (typeof this[n] === "function") || (typeof globalThis !== "undefined" && typeof globalThis[n] === "function") || (typeof this[n] === "function");
-    } catch(e) {
-      out.info.serverFunctions[n] = "check-failed:" + String(e);
-    }
-  });
-
-  // 9) permissions / session info (best-effort)
-  out.info.session = safeRun("session", function () {
-    var s = {};
-    try { s.activeUser = Session.getActiveUser() && Session.getActiveUser().getEmail ? Session.getActiveUser().getEmail() : null; } catch (e) { s.activeUserError = String(e); }
-    try { s.effectiveUser = Session.getEffectiveUser() && Session.getEffectiveUser().getEmail ? Session.getEffectiveUser().getEmail() : null; } catch (e) { s.effectiveUserError = String(e); }
-    return s;
-  });
-
-  // 10) Hints & hypotheses (based on data gathered)
-  out.hypotheses = [];
-  try {
-    // If there are zero history candidate sheets -> clue
-    var hc = out.info.historyCandidates.ok ? (out.info.historyCandidates.value || []) : [];
-    if (!hc.length) out.hypotheses.push("No history/archive sheet found. The close flow may expect a 'WasOnProject' or 'History' sheet to append into.");
-    // If many assigned students not found in any history entries, maybe history was never written
-    var histMatch = out.info.historyMatching.ok ? out.info.historyMatching.value.summary : null;
-    if (histMatch && histMatch.notFound === histMatch.totalAssigned) {
-      out.hypotheses.push("All current assigned students are not present in history sheets. That suggests saving to history wasn't executed or used a different history sheet/format.");
-    } else if (histMatch && histMatch.notFound > 0) {
-      out.hypotheses.push(histMatch.notFound + " of " + histMatch.totalAssigned + " assigned students are not in any detected history sheet.");
-    }
-    // If project headers are empty / mismatched
-    var th = out.info.targetData.ok ? out.info.targetData.value : null;
-    if (th && Object.keys(th.projects).length === 0) out.hypotheses.push("Target sheet row 2 has no project headers (or they are blank). Close flow may rely on headers to map columns into history.");
-  } catch(e) {
-    out.hypothesesError = String(e);
-  }
-
-  // log result
-  try {
-    Logger.log("=== runCloseSheetDebug result ===\n" + JSON.stringify(out, null, 2));
-  } catch (e) {
-    Logger.log("runCloseSheetDebug: failed to stringify output: " + String(e));
-  }
-
-  return out; // returned to caller (Run -> Logs will show it)
+  return students;
 }
 
+/**
+ * getSignedInStudentsOnTarget()
+ * - Returns a Set of normalized names currently on the active target sheet.
+ */
+function getSignedInStudentsOnTarget() {
+  const sheet = getTargetSheet();
+  const projMap = getProjectColumnMapForSheet(sheet);
+  const startRow = 3;
+  const maxRows = (typeof MAX_STUDENTS !== 'undefined' && MAX_STUDENTS) ? MAX_STUDENTS : 16;
+  const signed = new Set();
+  Object.values(projMap).forEach(col => {
+    const block = sheet.getRange(startRow, col + 1, maxRows, 1).getValues();
+    for (let i = 0; i < block.length; i++) {
+      const raw = (block[i][0] || "").toString().trim();
+      if (!raw) continue;
+      signed.add(normalizeName(raw));
+    }
+  });
+  return signed;
+}
 
+/**
+ * findAvailableProjectsForTarget()
+ * - Returns array: { projectName, col, assignedCount, capacityLeft }
+ */
+function findAvailableProjectsForTarget() {
+  const sheet = getTargetSheet();
+  const projMap = getProjectColumnMapForSheet(sheet);
+  const startRow = 3;
+  const maxRows = (typeof MAX_STUDENTS !== 'undefined' && MAX_STUDENTS) ? MAX_STUDENTS : 16;
+  const list = [];
+  Object.entries(projMap).forEach(([projectName, col]) => {
+    const block = sheet.getRange(startRow, col + 1, maxRows, 1).getValues();
+    let assigned = 0;
+    for (let i = 0; i < block.length; i++) {
+      if ((block[i][0] || "").toString().trim()) assigned++;
+    }
+    list.push({ projectName, col: Number(col), assignedCount: assigned, capacityLeft: Math.max(0, maxRows - assigned) });
+  });
+  return list;
+}
+
+/**
+ * safeSignInStudent(fullName, projectName)
+ * - Prefers existing writeStudentToProject() when available; otherwise writes directly.
+ * - Returns { ok: true/false, message: ..., row, col }
+ */
+function safeSignInStudent(fullName, projectName) {
+  try {
+    if (!fullName || !projectName) return { ok: false, message: "invalid args" };
+
+    // Prefer canonical API if present
+    if (typeof writeStudentToProject === "function") {
+      try {
+        const info = (typeof getStudentGradeGender === "function") ? (getStudentGradeGender(fullName) || {}) : {};
+        const res = writeStudentToProject(fullName, projectName, info.grade || "", info.gender || "");
+        // normalize result
+        if (res && typeof res === "object") return res;
+        return { ok: !!res, message: String(res || "") };
+      } catch (e) {
+        Logger.log("safeSignInStudent: writeStudentToProject threw, falling back: " + e.toString());
+        // fall through to fallback implementation
+      }
+    }
+
+    const sheet = getTargetSheet();
+    const projMap = getProjectColumnMapForSheet(sheet);
+    const col = projMap[projectName];
+    if (col === undefined || col === null) return { ok: false, message: "project not found on active sheet: " + projectName };
+
+    const startRow = 3;
+    const maxRows = (typeof MAX_STUDENTS !== 'undefined' && MAX_STUDENTS) ? MAX_STUDENTS : 16;
+    const blockRange = sheet.getRange(startRow, col + 1, maxRows, 2);
+    const vals = blockRange.getValues();
+
+    let insertIdx = -1;
+    for (let i = 0; i < vals.length; i++) {
+      if (!vals[i][0] || !String(vals[i][0]).trim()) { insertIdx = i; break; }
+    }
+    if (insertIdx === -1) return { ok: false, message: "no free slot in " + projectName };
+
+    const writeRow = startRow + insertIdx;
+    vals[insertIdx][0] = fullName;
+    try {
+      const info = (typeof getStudentGradeGender === "function") ? (getStudentGradeGender(fullName) || {}) : {};
+      vals[insertIdx][1] = info.grade || vals[insertIdx][1] || "";
+      blockRange.setValues(vals);
+
+      // set gender background on name cell (best-effort)
+      if (info && info.gender) {
+        const nameRange = sheet.getRange(writeRow, col + 1, 1, 1);
+        const gLower = String(info.gender).toLowerCase();
+        if (gLower.indexOf("f") === 0) nameRange.setBackground("#ffebee");
+        else if (gLower.indexOf("m") === 0) nameRange.setBackground("#e8f0fe");
+      }
+      try { setGradeConditionalFormatting(sheet, col); } catch (e) {}
+      return { ok: true, message: "signed " + fullName + " -> " + projectName + " (row " + writeRow + ")", row: writeRow, col: col };
+    } catch (e) {
+      return { ok: false, message: "write failed: " + e.toString() };
+    }
+
+  } catch (e) {
+    return { ok: false, message: "safeSignInStudent failed: " + e.toString() };
+  }
+}
+
+/**
+ * safeRemoveStudentFromProject(fullName, projectName)
+ * - Remove first matching row and compacts column
+ */
+function safeRemoveStudentFromProject(fullName, projectName) {
+  try {
+    if (!fullName || !projectName) return false;
+    const sheet = getTargetSheet();
+    const projMap = getProjectColumnMapForSheet(sheet);
+    const col = projMap[projectName];
+    if (col === undefined || col === null) return false;
+
+    const startRow = 3;
+    const maxRows = (typeof MAX_STUDENTS !== 'undefined' && MAX_STUDENTS) ? MAX_STUDENTS : 16;
+    const blockRange = sheet.getRange(startRow, col + 1, maxRows, 2);
+    const vals = blockRange.getValues();
+    const bgs = blockRange.getBackgrounds();
+
+    const targetNorm = normalizeName(fullName);
+    let idx = -1;
+    for (let i = 0; i < vals.length; i++) {
+      const n = (vals[i][0] || "").toString().trim();
+      if (n && normalizeName(n) === targetNorm) { idx = i; break; }
+    }
+    if (idx === -1) return false;
+
+    // shift up
+    for (let i = idx; i < vals.length - 1; i++) {
+      vals[i][0] = vals[i + 1][0];
+      vals[i][1] = vals[i + 1][1];
+      bgs[i][0] = bgs[i + 1][0];
+      bgs[i][1] = bgs[i + 1][1];
+    }
+    // clear last row
+    vals[vals.length - 1][0] = "";
+    vals[vals.length - 1][1] = "";
+    bgs[bgs.length - 1][0] = "";
+    bgs[bgs.length - 1][1] = "";
+
+    // write back
+    blockRange.setValues(vals);
+    try {
+      const nameRange = sheet.getRange(startRow, col + 1, maxRows, 1);
+      const gradeRange = sheet.getRange(startRow, col + 2, maxRows, 1);
+      const nameBgs = bgs.map(r => [r[0] || ""]);
+      const gradeBgs = bgs.map(r => [r[1] || ""]);
+      nameRange.setBackgrounds(nameBgs);
+      gradeRange.setBackgrounds(gradeBgs);
+    } catch (e) {
+      Logger.log("safeRemoveStudentFromProject: background set failed: " + e.toString());
+    }
+    try { setGradeConditionalFormatting(sheet, col); } catch (e) {}
+    return true;
+  } catch (e) {
+    Logger.log("safeRemoveStudentFromProject failed: " + e.toString());
+    return false;
+  }
+}
+
+/**
+ * tryRebalanceForStudent(studentFullName, history)
+ * - Single-step rebalance: move one occupant if it can be moved to free a slot.
+ */
+function tryRebalanceForStudent(studentFullName, history) {
+  if (!studentFullName) return { ok: false, reason: "invalid student" };
+  try {
+    const sheet = getTargetSheet();
+    const projMap = getProjectColumnMapForSheet(sheet);
+    const startRow = 3;
+    const maxRows = (typeof MAX_STUDENTS !== 'undefined' && MAX_STUDENTS) ? MAX_STUDENTS : 16;
+    const studentNorm = normalizeName(studentFullName);
+    history = history || {};
+    const projects = Object.keys(projMap);
+
+    for (const projectName of projects) {
+      if ((history[studentNorm] || {})[projectName]) continue; // student already did this
+      const col = projMap[projectName];
+      const block = sheet.getRange(startRow, col + 1, maxRows, 1).getValues();
+      // if free slot exists, no need to rebalance
+      const freeIdx = block.findIndex(r => !r[0] || !String(r[0]).trim());
+      if (freeIdx !== -1) return { ok: false, reason: "project has free slot" };
+
+      for (let i = 0; i < block.length; i++) {
+        const occupant = (block[i][0] || "").toString().trim();
+        if (!occupant) continue;
+        const occNorm = normalizeName(occupant);
+        const occHist = history[occNorm] || {};
+
+        for (const altProject of projects) {
+          if (altProject === projectName) continue;
+          if (occHist[altProject]) continue;
+          const altCol = projMap[altProject];
+          const altBlock = sheet.getRange(startRow, altCol + 1, maxRows, 1).getValues();
+          const altFreeIdx = altBlock.findIndex(r => !r[0] || !String(r[0]).trim());
+          if (altFreeIdx === -1) continue;
+
+          // perform move
+          const removed = safeRemoveStudentFromProject(occupant, projectName);
+          if (!removed) continue;
+          const signAlt = safeSignInStudent(occupant, altProject);
+          if (!signAlt || !signAlt.ok) {
+            // try revert
+            safeRemoveStudentFromProject(occupant, altProject);
+            safeSignInStudent(occupant, projectName);
+            continue;
+          }
+          const signTarget = safeSignInStudent(studentFullName, projectName);
+          if (!signTarget || !signTarget.ok) {
+            // revert both
+            safeRemoveStudentFromProject(occupant, altProject);
+            safeSignInStudent(occupant, projectName);
+            continue;
+          }
+
+          // update history
+          if (!history[occNorm]) history[occNorm] = {};
+          history[occNorm][altProject] = true;
+          if (!history[studentNorm]) history[studentNorm] = {};
+          history[studentNorm][projectName] = true;
+
+          return {
+            ok: true,
+            moved: occupant,
+            movedFrom: projectName,
+            movedTo: altProject,
+            placed: studentFullName,
+            details: { movedRow: signAlt.row || null, placedRow: signTarget.row || null }
+          };
+        }
+      }
+    }
+    return { ok: false, reason: "no single-step rebalance found" };
+  } catch (e) {
+    Logger.log("tryRebalanceForStudent failed: " + e.toString());
+    return { ok: false, reason: e.toString() };
+  }
+}
+
+/**
+ * findAndSignUnsignedStudents(options)
+ * - options.trySignIn (default true) actually writes, false does dry-run
+ * - returns report { signed, moved, skipped, errors }
+ */
+function findAndSignUnsignedStudents(options) {
+  options = options || {};
+  const trySignIn = (typeof options.trySignIn === "boolean") ? options.trySignIn : true;
+
+  const report = { signed: [], moved: [], skipped: [], errors: [] };
+
+  // 1) registered students
+  let allStudents = [];
+  try { allStudents = getAllRegisteredStudents(); } catch (e) { throw new Error("findAndSignUnsignedStudents: failed to read registered students: " + e.toString()); }
+
+  // 2) who is already signed in
+  let signedSet = new Set();
+  try { signedSet = getSignedInStudentsOnTarget(); } catch (e) { throw new Error("findAndSignUnsignedStudents: failed to read target sheet: " + e.toString()); }
+
+  // 3) history map
+  let history = {};
+  try { history = buildHistoryMapFromSheets(); } catch (e) { Logger.log("findAndSignUnsignedStudents: buildHistoryMapFromSheets failed: " + e.toString()); history = {}; }
+
+  // 4) project availability snapshot
+  let projects = findAvailableProjectsForTarget();
+  function refreshProjects() { projects = findAvailableProjectsForTarget(); }
+
+  // iterate students
+  for (let i = 0; i < allStudents.length; i++) {
+    const s = allStudents[i];
+    if (!s || !s.normalized) continue;
+    if (signedSet.has(s.normalized)) continue;
+
+    let placed = false;
+    // try direct placement
+    for (let p = 0; p < projects.length; p++) {
+      const proj = projects[p];
+      if (!proj || proj.capacityLeft <= 0) continue;
+      const histForStudent = history[s.normalized] || {};
+      if (histForStudent[proj.projectName]) continue;
+      if (trySignIn) {
+        const res = safeSignInStudent(s.fullName, proj.projectName);
+        if (res && res.ok) {
+          report.signed.push({ student: s.fullName, project: proj.projectName, message: res.message });
+          signedSet.add(s.normalized);
+          refreshProjects();
+          placed = true;
+          break;
+        } else {
+          report.errors.push({ student: s.fullName, project: proj.projectName, reason: res ? res.message : "unknown" });
+          continue;
+        }
+      } else {
+        report.signed.push({ student: s.fullName, project: proj.projectName, message: "dry-run would assign" });
+        signedSet.add(s.normalized);
+        refreshProjects();
+        placed = true;
+        break;
+      }
+    }
+    if (placed) continue;
+
+    // try single-step rebalance
+    if (trySignIn) {
+      const reb = tryRebalanceForStudent(s.fullName, history);
+      if (reb && reb.ok) {
+        report.moved.push({
+          studentPlaced: reb.placed,
+          movedStudent: reb.moved,
+          movedFrom: reb.movedFrom,
+          movedTo: reb.movedTo,
+          details: reb.details
+        });
+        signedSet.add(normalizeName(reb.placed));
+        if (!history[normalizeName(reb.moved)]) history[normalizeName(reb.moved)] = {};
+        history[normalizeName(reb.moved)][reb.movedTo] = true;
+        if (!history[normalizeName(reb.placed)]) history[normalizeName(reb.placed)] = {};
+        history[normalizeName(reb.placed)][reb.movedFrom] = true;
+        refreshProjects();
+        continue;
+      }
+    }
+
+    report.skipped.push({ student: s.fullName, reason: "no available project (or only ones student already did)" });
+  }
+
+  return report;
+}
+
+/* ---------- end auto-assign helpers ---------- */
 
 /* ============= Web entry ============= */
 function doGet(e) {
-  // Expects a file named "Index.html" in the project (same as your front-end)
-  return HtmlService.createHtmlOutputFromFile('index').setTitle('Project Sign-In');
+  // Expects a file named "index.html" in the project (same as your front-end)
+  return HtmlService.createHtmlOutputFromFile('index').setTitle('PřV projekt Sign-In');
 }
 
-/* EOF */
-function _testSwap() {
-  const samples = [
-    ["John Doe", 1493058526],    // should become "Doe John"
-    ["Jane Mary Smith", 1220633850], // "Mary Smith Jane"
-    ["Novak, Petr", undefined],  // should become "Petr Novak" (comma-handling)
-    ["Alice Johnson", 999999999], // unchanged
-    ["Bob", 1493058526] // unchanged (single token)
-  ];
-  samples.forEach(([name, id]) => {
-    Logger.log('%s  ->  %s (id=%s)', name, swapNameIfNeeded(name, id), id);
-  });
+/**
+ *   DEBUG FUNCTIONS 
+ *  Functions to debug the script -- Will be deleted 
+ * 
+*/
+function _runAutoSignAll() {
+  const out = findAndSignUnsignedStudents({ trySignIn: true });
+  Logger.log("LIVE signed=%d, moved=%d, skipped=%d, errors=%d", out.signed.length, out.moved.length, out.skipped.length, out.errors.length);
+  return out;
 }
